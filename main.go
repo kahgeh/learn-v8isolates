@@ -11,6 +11,11 @@ import (
 	"rogchap.com/v8go"
 )
 
+type software struct {
+	fileName        string
+	originalContent string
+}
+
 func readUserJsFileName() string {
 	path, _ := os.Getwd()
 	reader := bufio.NewReader(os.Stdin)
@@ -19,8 +24,23 @@ func readUserJsFileName() string {
 	return fmt.Sprintf("%s/%s", path, strings.Replace(text, "\n", "", -1))
 }
 
-func runJs(script string, fileName string) (result *v8go.Value, err error) {
+func readEvent() string {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Println("Provide the event input to the javascript")
+	text, _ := reader.ReadString('\n')
+	return strings.Replace(text, "\n", "", -1)
+}
 
+func (app *software) getScript(event string) string {
+	content := app.originalContent
+	suffix := fmt.Sprintf(`main(JSON.parse('%s'),JSON.parse('{"user":"me"}'));`, event)
+	script := fmt.Sprintf("%s\n%s", content, suffix)
+	return script
+}
+
+func (app *software) run(event string) (result *v8go.Value, err error) {
+	fileName := app.fileName
+	script := app.getScript(event)
 	ctx, _ := v8go.NewContext(nil) // creates a new V8 context with a new Isolate aka VM
 	vals := make(chan *v8go.Value, 1)
 	errs := make(chan error, 1)
@@ -46,18 +66,28 @@ func runJs(script string, fileName string) (result *v8go.Value, err error) {
 	}
 }
 
+func newApp(content string, fileName string) *software {
+	return &software{
+		fileName:        fileName,
+		originalContent: content,
+	}
+}
+
 func main() {
 
 	for {
 		jsFileName := readUserJsFileName()
+		event := readEvent()
 		start := time.Now()
+
 		content, err := ioutil.ReadFile(jsFileName)
 		if err != nil {
 			fmt.Printf("error reading javascript file %q, %s\n", jsFileName, err.Error())
 			continue
 		}
+		app := newApp(string(content), jsFileName)
 		loadingElapsed := time.Since(start)
-		result, err := runJs(string(content), jsFileName)
+		result, err := app.run(event)
 		if err != nil {
 			fmt.Printf("error running javascript file %q, %s\n", jsFileName, err.Error())
 			continue

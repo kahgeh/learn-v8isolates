@@ -11,5 +11,7 @@ function fibonacci(num) {
     return b;
 }
 
-result = fibonacci(10)
-result
+function main(event, context) {
+    return `request submitted by ${context.user} with parameter ${event.param1} = ${fibonacci(event.param1)}`;
+}
+
