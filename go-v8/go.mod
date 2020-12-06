@@ -1,4 +1,4 @@
-module github.com/kahgeh/learn-v8isolates
+module github.com/kahgeh/learn-v8isolates/go-v8
 
 go 1.15
 
