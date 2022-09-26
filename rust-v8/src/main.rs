@@ -4,13 +4,14 @@
 extern crate log;
 mod async_cell;
 
+use tokio::runtime::{Builder, Runtime};
 use crate::async_cell::{AsyncMutFuture, AsyncRefCell, AsyncRefFuture, RcRef};
 use deno_core::BufVec;
 use deno_core::JsRuntime;
 use deno_core::Op;
 use deno_core::OpState;
 use deno_core::Resource;
-
+use futures::future::try_join_all;
 use deno_core::ZeroCopyBuf;
 use futures::future::FutureExt;
 use futures::future::TryFuture;
@@ -45,6 +46,9 @@ impl log::Log for Logger {
   fn flush(&self) {}
 }
 
+struct Dum;
+
+impl Resource for Dum {}
 // Note: it isn't actually necessary to wrap the `tokio::net::TcpListener` in
 // a cell, because it only supports one op (`accept`) which does not require
 // a mutable reference to the listener.
@@ -130,8 +134,9 @@ impl From<Record> for RecordBuf {
   }
 }
 
-fn create_js_runtime() -> JsRuntime {
+fn create_js_runtime(port: usize) -> JsRuntime {
   let mut js_runtime = JsRuntime::new(Default::default());
+  let op_listen=create_op_listen(port);
   register_op_bin_sync(&mut js_runtime, "listen", op_listen);
   register_op_bin_sync(&mut js_runtime, "close", op_close);
   register_op_bin_async(&mut js_runtime, "accept", op_accept);
@@ -139,48 +144,52 @@ fn create_js_runtime() -> JsRuntime {
   register_op_bin_async(&mut js_runtime, "write", op_write);
   js_runtime
 }
-
-fn op_listen(state: &mut OpState, _rid: u32, _bufs: &mut [ZeroCopyBuf]) -> Result<u32, Error> {
-  debug!("listen");
-  let addr = "127.0.0.1:4544".parse::<SocketAddr>().unwrap();
-  let std_listener = std::net::TcpListener::bind(&addr)?;
-  std_listener.set_nonblocking(true)?;
-  let listener = TcpListener::try_from(std_listener)?;
-  let rid = state.resource_table_2.add(listener);
-  Ok(rid)
+fn create_op_listen (port: usize) -> Box<dyn Fn(&mut OpState, u32, &mut [ZeroCopyBuf])  -> Result<u32, Error>> {
+  Box::new(
+    move|state, _rid, _bufs|{
+      //println!("***listening on {}", port);
+      let addr = format!("127.0.0.1:{port}", port=port).parse::<SocketAddr>().unwrap();
+      let std_listener = std::net::TcpListener::bind(&addr)?;
+      std_listener.set_nonblocking(true)?;
+      let listener = TcpListener::try_from(std_listener)?;
+      let rid = state.resource_table.add(listener);
+      Ok(rid)
+    }
+  )
+  
 }
 
 fn op_close(state: &mut OpState, rid: u32, _bufs: &mut [ZeroCopyBuf]) -> Result<u32, Error> {
   debug!("close rid={}", rid);
   state
-    .resource_table_2
+    .resource_table
     .close(rid)
     .map(|_| 0)
     .ok_or_else(bad_resource_id)
 }
 
 async fn op_accept(state: Rc<RefCell<OpState>>, rid: u32, _bufs: BufVec) -> Result<u32, Error> {
-  println!("accept rid={}", rid);
+  //println!("accept rid={}", rid);
 
   let listener_rc = state
     .borrow()
-    .resource_table_2
+    .resource_table
     .get::<TcpListener>(rid)
     .ok_or_else(bad_resource_id)?;
   let listener_ref = listener_rc.borrow().await;
 
   let stream: TcpStream = listener_ref.accept().await?.0.into();
-  let rid = state.borrow_mut().resource_table_2.add(stream);
+  let rid = state.borrow_mut().resource_table.add(stream);
   Ok(rid)
 }
 
 async fn op_read(state: Rc<RefCell<OpState>>, rid: u32, mut bufs: BufVec) -> Result<usize, Error> {
   assert_eq!(bufs.len(), 1, "Invalid number of arguments");
-  println!("read rid={}", rid);
+  //println!("read rid={}", rid);
 
   let stream_rc = state
     .borrow()
-    .resource_table_2
+    .resource_table
     .get::<TcpStream>(rid)
     .ok_or_else(bad_resource_id)?;
   let mut rd_stream_mut = stream_rc.rd_borrow_mut().await;
@@ -194,7 +203,7 @@ async fn op_write(state: Rc<RefCell<OpState>>, rid: u32, bufs: BufVec) -> Result
 
   let stream_rc = state
     .borrow()
-    .resource_table_2
+    .resource_table
     .get::<TcpStream>(rid)
     .ok_or_else(bad_resource_id)?;
 
@@ -271,20 +280,30 @@ fn main() {
   // NOTE: `--help` arg will display V8 help and exit
   deno_core::v8_set_flags(env::args().collect());
 
-  let mut js_runtime = create_js_runtime();
-  let runtime = tokio::runtime::Builder::new_current_thread()
+  let mut runs: Vec<_> = vec![];
+  for i in 0..10000 {
+    let mut js_runtime = create_js_runtime(4500+i);
+    let future = async move {
+      js_runtime
+        .execute("test.js", include_str!("test.js"))
+        .unwrap();
+      js_runtime.run_event_loop().await
+    };
+    runs.insert(i, future);
+  }
+  println!("all started");
+  let all = try_join_all(runs);
+  let rt = Builder::new_multi_thread()
+    .max_blocking_threads(4)
     .enable_all()
     .build()
     .unwrap();
 
-  let future = async move {
-    js_runtime
-      .execute("test.js", include_str!("test.js"))
-      .unwrap();
-    js_runtime.run_event_loop().await
-  };
-  runtime.block_on(future).unwrap();
+  rt.block_on(all);
 }
+
+#[derive(Debug, Clone)]
+struct ExecError;
 
 #[test]
 fn test_record_from() {
